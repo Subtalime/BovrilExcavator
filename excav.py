@@ -1,3 +1,10 @@
+# Excavator Bot
+# Copyright S. Tschache (@TheZedan, bovril@tschache.com) 2019
+# Latest Version can be found on GitHub at https://github.com/Subtalime/BovrilExcavator
+#
+# Written for BOVRIL bORErs Mining Corporation to handle Corp-Excavators
+#
+
 # Works with Python 3.6
 # When using Python 3.7 install https://github.com/Rapptz/discord.py/archive/rewrite.zip
 # python -m pip install -U https://github.com/Rapptz/discord.py/archive/rewrite.zip
