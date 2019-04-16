@@ -11,13 +11,17 @@ import asyncio
 import re
 from datetime import datetime
 import logging
+from logging.handlers import RotatingFileHandler
 from settings import BOT_DB, BOT_ID, BOT_LOG, BOT_PREFIX
 
 logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("excav")
 logger.setLevel(logging.DEBUG)
-handler = logging.FileHandler(filename=BOT_LOG, encoding="utf-8", mode="w")
+handler = RotatingFileHandler(filename=BOT_LOG
+                                      , encoding="utf-8"
+                                      , mode="a"
+                                      , maxBytes=1024*10000)
 handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s'))
 logger.addHandler(handler)
 
@@ -60,7 +64,7 @@ class MyExcavatorBot(Bot):
                                , 'when': datetime.now().timetuple()})
         query = Query()
         if self.db_lending.contains(query.id == user.id):
-            self.db_lending.update(add('borrowed', amount), query.id == user.id)
+            self.db_lending.upsert(add('borrowed', amount), query.id == user.id)
         else:
             self.db_lending.insert({'id': user.id, 'user': user.name, 'borrowed': amount})
         logger.info("{} handed to {} \"{}\" Excavators".format(cmdr, user, amount))
@@ -96,7 +100,8 @@ class MyExcavatorBot(Bot):
 
     @staticmethod
     def get_date(rec):
-        return datetime(*rec['when'][0:6])
+        tup = rec['when'][0:6]
+        return datetime(*tup)
 
     def action_output(self, context, record):
         issuer = context.guild.get_member(record['issuer'])
@@ -111,8 +116,8 @@ class MyExcavatorBot(Bot):
 
     @asyncio.coroutine
     def my_status(self, context, usr=None, messages=5):
+        query = Query()
         if usr:
-            query = Query()
             # current Borrowing
             result = self.db_lending.get(query.id == usr.id)
             if result:
@@ -131,13 +136,13 @@ class MyExcavatorBot(Bot):
             else:
                 self.errlog_add("There are not Actions regarding User {}".format(usr.name))
         else:
-            result = self.db_lending.search()
+            result = self.db_lending.all()
             if result:
                 for res in result:
                     lender = context.guild.get_member(res['id'])
                     self.errlog_add("**{}** currently has **{}** Excavators".
-                                    format(lender.name, result['borrowed']))
-            result = self.db_action.search()
+                                    format(lender.name, res['borrowed']))
+            result = self.db_action.all()
             if result:
                 ordered = sorted(result, key=lambda k: self.get_date(k), reverse=True)
                 for index, res in enumerate(ordered):
@@ -151,6 +156,7 @@ my_bot = MyExcavatorBot(command_prefix=BOT_PREFIX, case_insensitive=True)
 
 @my_bot.command(pass_context=True, hidden=False)
 async def help(ctx, *cog):
+    logger.debug("CMD: {} {}".format(ctx.message.author, ctx.message.clean_content))
     if not cog:
         halp = Embed(title="Command listing and uncategorized commands",
                      description="Use \"!help **cmd**\" to find out more about the cog",
@@ -179,6 +185,7 @@ async def help(ctx, *cog):
                      "If you omit the user, all currently borrowed and the last 5 action messages will be shown.\n"
                 )
 async def s(ctx):
+    logger.debug("CMD: {} {}".format(ctx.message.author, ctx.message.clean_content))
     usr = None
     if len(ctx.message.mentions) > 0:
         usr = ctx.message.mentions[0]
@@ -198,12 +205,18 @@ async def s(ctx):
                      "Make sure you enter the correct number of Excavators, else it defaults to 5\n"
                 )
 async def a(ctx):
-    assert len(ctx.message.mentions), logger.warning("No User mentioned : {}".
-                                                     format(ctx.message.content))
+    logger.debug("CMD: {} {}".format(ctx.message.author, ctx.message.clean_content))
+    if not len(ctx.message.mentions):
+        logger.warning("No/Invalid User mentioned : {}".format(ctx.message.content))
+        ctx.channel.send("No/Invalid user mentioned")
+        return
     usr = ctx.message.mentions[0]
     # don't react on Bot
-    assert usr.id != my_bot.user.id, logger.warning("{} Tried to add to Bot ({}): {}".
-                                                    format(usr.id, my_bot.user.id, ctx.message.content))
+    if usr.id == my_bot.user.id:
+        logger.warning("{} Tried to add to Bot ({}): {}".format(usr.id, my_bot.user.id,
+                                                                ctx.message.clean_content))
+        ctx.channel.send("Invalid user mentioned")
+        return
     res = re.findall("(\d+)$", ctx.message.content)
     val = abs(int(res[0])) if len(res) > 0 else 5
     await my_bot.my_add(ctx.message.author, usr, val)
@@ -221,12 +234,18 @@ async def a(ctx):
                      "Make sure you enter the correct number of Excavators, else it defaults to 5\n"
                 )
 async def d(ctx):
-    assert len(ctx.message.mentions), logger.warning("No User mentioned : {}".
-                                                     format(ctx.message.content))
+    logger.debug("CMD: {} {}".format(ctx.message.author, ctx.message.clean_content))
+    if not len(ctx.message.mentions):
+        logger.warning("No/Invalid User mentioned : {}".format(ctx.message.clean_content))
+        ctx.channel.send("No/Invalid user mentioned")
+        return
     usr = ctx.message.mentions[0]
     # don't react on Bot
-    assert usr.id != my_bot.user.id, logger.warning("{} Tried to add to Bot ({}): {}".
-                                                    format(usr.id, my_bot.user.id, ctx.message.content))
+    if usr.id == my_bot.user.id:
+        logger.warning("{} Tried to remove from Bot ({}): {}".format(usr.id, my_bot.user.id,
+                                                                     ctx.message.clean_content))
+        ctx.channel.send("Invalid user mentioned")
+        return
     res = re.findall('(\d+)$', ctx.message.content)
     val = abs(int(res[0])) if len(res) > 0 else 5
     await my_bot.my_del(ctx.message.author, usr, val)
@@ -236,11 +255,9 @@ async def d(ctx):
 @asyncio.coroutine
 async def print_errors(channel):
     if my_bot.has_errors():
-        # await channel.send("")
         for err in my_bot.errlog_fetch():
-            logging.info("```{}: {}```".format(channel.name, err))
+            logger.info("```{}: {}```".format(channel.name, err))
             await channel.send(err)
-        # await channel.send("```")
 
 
 my_bot.run(BOT_ID)
