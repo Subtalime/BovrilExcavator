@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 import logging
 from logging.handlers import RotatingFileHandler
-from settings import BOT_DB, BOT_ID, BOT_LOG, BOT_PREFIX
+from settings import BOT_DB, BOT_ID, BOT_LOG, BOT_PREFIX, STATUS_LENGTH
 
 logging.basicConfig(level=logging.INFO)
 
@@ -56,20 +56,24 @@ class MyExcavatorBot(Bot):
             self.errlog_add("No \"client\" ({}) or \"amount\" ({}) given!".format(user.name
                                                                                   , amount))
             return
-        # handle DB entry
-        self.db_action.insert({'issuer': cmdr.id
-                               , 'user': user.id
-                               , 'action': 'add'
-                               , 'amount': amount
-                               , 'when': datetime.now().timetuple()})
-        query = Query()
-        if self.db_lending.contains(query.id == user.id):
-            self.db_lending.upsert(add('borrowed', amount), query.id == user.id)
-        else:
-            self.db_lending.insert({'id': user.id, 'user': user.name, 'borrowed': amount})
-        logger.info("{} handed to {} \"{}\" Excavators".format(cmdr, user, amount))
-        result = self.db_lending.get(query.id == user.id)
-        self.errlog_add("Given {} **{}** Excavators. He has now **{}** in Total".format(user.name, amount, result['borrowed']))
+        try:
+            # handle DB entry
+            self.db_action.insert({'issuer': cmdr.id
+                                   , 'user': user.id
+                                   , 'action': 'add'
+                                   , 'amount': amount
+                                   , 'when': datetime.now().timetuple()})
+            query = Query()
+            if self.db_lending.contains(query.id == user.id):
+                self.db_lending.upsert(add('borrowed', amount), query.id == user.id)
+            else:
+                self.db_lending.insert({'id': user.id, 'user': user.name, 'borrowed': amount})
+            logger.info("{} handed to {} \"{}\" Excavators".format(cmdr, user, amount))
+            result = self.db_lending.get(query.id == user.id)
+            self.errlog_add("Given {} **{}** Excavators. He has now **{}** in Total".
+                            format(user.name, amount, result['borrowed']))
+        except Exception as e:
+            logger.error("Error occurred: {}".format(e), exc_info=True)
 
     @asyncio.coroutine
     def my_del(self, cmdr, user, amount):
@@ -77,26 +81,29 @@ class MyExcavatorBot(Bot):
             self.errlog_add("No \"client\" ({}) or \"amount\" ({}) given!".format(user, amount))
             return
         # handle DB entry
-        self.db_action.insert({'issuer': cmdr.id
-                               , 'user': user.id
-                               , 'action': 'delete'
-                               , 'amount': amount
-                               , 'when': datetime.now().timetuple()
-                               })
-        query = Query()
-        if self.db_lending.contains(query.id == user.id):
-            self.db_lending.update(subtract('borrowed', amount), query.id == user.id)
-        else:
-            self.errlog_add("User {} never borrowed any Excavators. Ignored!".format(user.name))
-            return
-        if self.db_lending.contains((query.id == user.id) & (query.borrowed <= 0)):
-            self.db_lending.remove(query.id == user.id)
-        logger.info("{} handed back from {} {} Excavators".format(cmdr, user, amount))
-        result = self.db_lending.get(query.id == user.id)
-        if len(result) == 0:
-            result['borrowed'] = 0
-        self.errlog_add("{} returned **{}** Excavators. He now has **{}**".
-                        format(user.name, amount, result['borrowed']))
+        try:
+            self.db_action.insert({'issuer': cmdr.id
+                                   , 'user': user.id
+                                   , 'action': 'delete'
+                                   , 'amount': amount
+                                   , 'when': datetime.now().timetuple()
+                                   })
+            query = Query()
+            if self.db_lending.contains(query.id == user.id):
+                self.db_lending.update(subtract('borrowed', amount), query.id == user.id)
+            else:
+                self.errlog_add("User {} never borrowed any Excavators. Ignored!".format(user.name))
+                return
+            if self.db_lending.contains((query.id == user.id) & (query.borrowed <= 0)):
+                self.db_lending.remove(query.id == user.id)
+            logger.info("{} handed back from {} {} Excavators".format(cmdr, user, amount))
+            result = self.db_lending.get(query.id == user.id)
+            if len(result) == 0:
+                result['borrowed'] = 0
+            self.errlog_add("{} returned **{}** Excavators. He now has **{}**".
+                            format(user.name, amount, result['borrowed']))
+        except Exception as e:
+            logger.error("Error occurred: {}".format(e), exc_info=True)
 
     @staticmethod
     def get_date(rec):
@@ -104,51 +111,59 @@ class MyExcavatorBot(Bot):
         return datetime(*tup)
 
     def action_output(self, context, record):
-        issuer = context.guild.get_member(record['issuer'])
-        lender = context.guild.get_member(record['user'])
-        w = datetime(*record['when'][0:6])
-        when = w.strftime("%Y-%m-%d %H:%M:%S")
-        self.errlog_add("{} actioned \'{}\' of {} Excavators to {} on {}".format(issuer.name,
-                                                                                 record['action'],
-                                                                                 record['amount'],
-                                                                                 lender.name,
-                                                                                 when))
+        # Member may no longer exist, so get_member may fail
+        try:
+            issuer = context.guild.get_member(record['issuer'])
+            lender = context.guild.get_member(record['user'])
+            w = datetime(*record['when'][0:6])
+            when = w.strftime("%Y-%m-%d %H:%M:%S")
+            self.errlog_add("{} actioned \'{}\' of {} Excavators to {} on {}".
+                            format(issuer.name,
+                                   record['action'],
+                                   record['amount'],
+                                   lender.name,
+                                   when))
+        except Exception as e:
+            logger.error("Error occurred: {}".format(e), exc_info=True)
 
     @asyncio.coroutine
-    def my_status(self, context, usr=None, messages=5):
+    def my_status(self, context, messages, usr):
         query = Query()
-        if usr:
-            # current Borrowing
-            result = self.db_lending.get(query.id == usr.id)
-            if result:
-                self.errlog_add("**{}** currently has **{}** Excavators".
-                                format(usr.name, result['borrowed']))
-            else:
-                self.errlog_add("**{}** has no Excavators".format(usr.name))
-            # Status Logs
-            result = self.db_action.search(query.user == usr.id)
-            if result:
-                ordered = sorted(result, key=lambda k: self.get_date(k), reverse=True)
-                for index, res in enumerate(ordered):
-                    self.action_output(context, res)
-                    if index == messages:
-                        break
-            else:
-                self.errlog_add("There are not Actions regarding User {}".format(usr.name))
-        else:
-            result = self.db_lending.all()
-            if result:
-                for res in result:
-                    lender = context.guild.get_member(res['id'])
+        try:
+            if usr:
+                # current Borrowing
+                result = self.db_lending.get(query.id == usr.id)
+                if result:
                     self.errlog_add("**{}** currently has **{}** Excavators".
-                                    format(lender.name, res['borrowed']))
-            result = self.db_action.all()
-            if result:
-                ordered = sorted(result, key=lambda k: self.get_date(k), reverse=True)
-                for index, res in enumerate(ordered):
-                    self.action_output(context, res)
-                    if index == messages:
-                        break
+                                    format(usr.name, result['borrowed']))
+                else:
+                    self.errlog_add("**{}** has no Excavators".format(usr.name))
+                # Status Logs
+                result = self.db_action.search(query.user == usr.id)
+                if result:
+                    ordered = sorted(result, key=lambda k: self.get_date(k), reverse=True)
+                    for index, res in enumerate(ordered):
+                        self.action_output(context, res)
+                        if index == messages:
+                            break
+                else:
+                    self.errlog_add("There are not Actions regarding User {}".format(usr.name))
+            else:
+                result = self.db_lending.all()
+                if result:
+                    for res in result:
+                        lender = context.guild.get_member(res['id'])
+                        self.errlog_add("**{}** currently has **{}** Excavators".
+                                        format(lender.name, res['borrowed']))
+                result = self.db_action.all()
+                if result:
+                    ordered = sorted(result, key=lambda k: self.get_date(k), reverse=True)
+                    for index, res in enumerate(ordered):
+                        self.action_output(context, res)
+                        if index == messages:
+                            break
+        except Exception as e:
+            logger.error("Error occurred: {}".format(e), exc_info=True)
 
 
 my_bot = MyExcavatorBot(command_prefix=BOT_PREFIX, case_insensitive=True)
@@ -158,31 +173,32 @@ my_bot = MyExcavatorBot(command_prefix=BOT_PREFIX, case_insensitive=True)
 async def help(ctx, *cog):
     logger.debug("CMD: {} {}".format(ctx.message.author, ctx.message.clean_content))
     if not cog:
-        halp = Embed(title="Command listing and uncategorized commands",
-                     description="Use \"!help **cmd**\" to find out more about the cog",
-                     color=0x27a73e)
+        help_msg = Embed(title="Command listing and uncategorized commands",
+                         description="Use \"!help **cmd**\" to find out more about the cog",
+                         color=0x27a73e)
         cogs_desc = ""
         for x in my_bot.commands:
             cogs_desc += ("{}{} - {}\n".format(my_bot.command_prefix, x.name, x.signature))
-        # for x in my_bot.cogs:
-        #     cogs_desc += ("{} - {}\n".format(x, my_bot.cogs[x].__doc__))
-        halp.add_field(name="cmds", value=cogs_desc[0:len(cogs_desc)-1])
+        help_msg.add_field(name="cmds", value=cogs_desc[0:len(cogs_desc)-1])
     else:
-        halp = Embed(color=0x27a73e, title="{} Command Listing".format(cog))
+        help_msg = Embed(color=0x27a73e, title="{} Command Listing".format(cog))
         for x in my_bot.commands:
             if x.name in cog:
-                halp.add_field(name="{0}{1.name}".format(my_bot.command_prefix, x),
-                               value="Usage: {}\n{}".format(x.signature, x.help))
-    await ctx.channel.send(embed=halp)
+                help_msg.add_field(name="{0}{1.name}".format(my_bot.command_prefix, x),
+                                   value="Usage: {}\n{}".format(x.signature, x.help))
+    await ctx.channel.send(embed=help_msg)
+
 
 # return Status of Excavators
 @my_bot.command(pass_context=True,
                 hidden=False,
                 brief="Returns status of a given User or last X entries",
-                usage="<{}>s [@User] [number of messages (default 5)]".format(my_bot.command_prefix),
+                usage="<{}>s [@User] [number of messages (default {})]".format(
+                    my_bot.command_prefix, STATUS_LENGTH),
                 help="Gives status of a user and last 5 actions on the user.\n"
                      "You may control the number of actions to be printed out.\n"
-                     "If you omit the user, all currently borrowed and the last 5 action messages will be shown.\n"
+                     "If you omit the user, all currently borrowed and the last"
+                     " {} action messages will be shown.\n".format(STATUS_LENGTH)
                 )
 async def s(ctx):
     logger.debug("CMD: {} {}".format(ctx.message.author, ctx.message.clean_content))
@@ -190,8 +206,8 @@ async def s(ctx):
     if len(ctx.message.mentions) > 0:
         usr = ctx.message.mentions[0]
     res = re.findall("(\d+)$", ctx.message.content)
-    messages = abs(int(res[0])) if len(res) > 0 else None
-    await my_bot.my_status(ctx, usr, messages)
+    messages = abs(int(res[0])) if len(res) > 0 else STATUS_LENGTH
+    await my_bot.my_status(ctx, messages, usr)
     await print_errors(ctx.channel)
 
 
@@ -200,9 +216,12 @@ async def s(ctx):
                 hidden=False,
                 brief="Used to hand out Excavators to a User",
                 usage="{}a <@User> [number of Excavators (default 5)]".format(my_bot.command_prefix),
-                help="Used to log Excavators being handed out to users. This enables us to keep track where they are.\n"
-                     "Anyone with the correct rights can Give or Take back Excavators for any User.\n"
-                     "Make sure you enter the correct number of Excavators, else it defaults to 5\n"
+                help="Used to log Excavators being handed out to users. "
+                     "This enables us to keep track where they are.\n"
+                     "Anyone with the correct rights can Give or Take back "
+                     "Excavators for any User.\n"
+                     "Make sure you enter the correct number of Excavators, "
+                     "else it defaults to 5\n"
                 )
 async def a(ctx):
     logger.debug("CMD: {} {}".format(ctx.message.author, ctx.message.clean_content))
@@ -230,8 +249,10 @@ async def a(ctx):
                 usage="{}d <@User> [number of Excavators (default 5)]".format(my_bot.command_prefix),
                 help="Used to log Excavators being handed back to the corp."
                      "This enables us to keep track where they are.\n"
-                     "Anyone with the correct rights can Give or Take back Excavators for any User.\n"
-                     "Make sure you enter the correct number of Excavators, else it defaults to 5\n"
+                     "Anyone with the correct rights can Give or Take back Excavators "
+                     "for any User.\n"
+                     "Make sure you enter the correct number of Excavators, "
+                     "else it defaults to 5\n"
                 )
 async def d(ctx):
     logger.debug("CMD: {} {}".format(ctx.message.author, ctx.message.clean_content))
